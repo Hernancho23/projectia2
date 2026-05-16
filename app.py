@@ -183,26 +183,48 @@ hr { border-color: var(--argos-border); }
 @st.cache_data(ttl=3600)
 def load_data():
     end   = datetime.today()
-    start = end - timedelta(days=185)  # ~6 meses + margen
+    start = end - timedelta(days=210)  # ~7 meses con margen extra para ≥90 obs limpias
 
-    tickers = {
-        "CEMARGOS": "CEMARGOS.CL",
-        "ICOLCAP":  "ICOLCAP.CL",
-        "TRM":      "COP=X",
+    tkr_map = {
+        "CEMARGOS.CL": "CEMARGOS",
+        "ICOLCAP.CL":  "ICOLCAP",
+        "COP=X":       "TRM",
     }
+    tickers = list(tkr_map.keys())
 
-    raw = {}
-    for key, tkr in tickers.items():
-        df = yf.download(tkr, start=start, end=end, auto_adjust=True, progress=False)
-        if not df.empty:
-            raw[key] = df["Close"].rename(key)
+    # Descarga conjunta → yfinance devuelve MultiIndex (Price, Ticker) en columnas
+    raw = yf.download(
+        tickers,
+        start=start,
+        end=end,
+        auto_adjust=True,
+        progress=False,
+        group_by="column",   # columnas agrupadas por tipo de precio
+    )
 
-    combined = pd.concat(raw.values(), axis=1)
-    combined.index = pd.to_datetime(combined.index)
-    combined.index = combined.index.tz_localize(None)
-    combined = combined.dropna()
-    combined = combined.sort_index()
-    return combined
+    # ── Aplanar / extraer precios de cierre ────────────────────────────────
+    # Con group_by="column" el MultiIndex es (Price, Ticker):
+    #   nivel 0 → "Close", "Open", …
+    #   nivel 1 → "CEMARGOS.CL", "ICOLCAP.CL", "COP=X"
+    if isinstance(raw.columns, pd.MultiIndex):
+        close = raw["Close"].copy()          # selecciona la capa "Close"
+    else:
+        # En versiones más antiguas de yfinance puede que no haya MultiIndex
+        close = raw[["Close"]].copy() if "Close" in raw.columns else raw.copy()
+
+    # Renombrar columnas al nombre corto
+    close = close.rename(columns=tkr_map)
+
+    # ── Limpieza de índice ─────────────────────────────────────────────────
+    close.index = pd.to_datetime(close.index)
+    if close.index.tz is not None:
+        close.index = close.index.tz_localize(None)
+
+    # ffill para cubrir festivos de la BVC, luego dropna
+    close = close.ffill().dropna()
+    close = close.sort_index()
+
+    return close
 
 
 # ─────────────────────────────────────────────
