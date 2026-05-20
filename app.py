@@ -183,42 +183,48 @@ hr { border-color: var(--argos-border); }
 @st.cache_data(ttl=3600)
 def load_data():
     end   = datetime.today()
-    start = end - timedelta(days=210)  # ~7 meses con margen para >=90 obs limpias
+    start = end - timedelta(days=210)  # ~7 meses con margen extra para ≥90 obs limpias
 
-    ticker_argos  = "CEMARGOS.CL"
-    ticker_colcap = "ICOLCAP.CL"
-    ticker_trm    = "COP=X"
+    tkr_map = {
+        "CEMARGOS.CL": "CEMARGOS",
+        "ICOLCAP.CL":  "ICOLCAP",
+        "COP=X":       "TRM",
+    }
+    tickers = list(tkr_map.keys())
 
-    # -- Descarga individual por ticker (evita MultiIndex cruzado) ----------
-    df_a = yf.download(ticker_argos,  start=start, end=end, progress=False)
-    df_c = yf.download(ticker_colcap, start=start, end=end, progress=False)
-    df_t = yf.download(ticker_trm,    start=start, end=end, progress=False)
+    # Descarga conjunta → yfinance devuelve MultiIndex (Price, Ticker) en columnas
+    raw = yf.download(
+        tickers,
+        start=start,
+        end=end,
+        auto_adjust=True,
+        progress=False,
+        group_by="column",   # columnas agrupadas por tipo de precio
+    )
 
-    # -- Aplanar MultiIndex si yfinance lo genera ---------------------------
-    for d in [df_a, df_c, df_t]:
-        if isinstance(d.columns, pd.MultiIndex):
-            d.columns = d.columns.get_level_values(0)
+    # ── Aplanar / extraer precios de cierre ────────────────────────────────
+    # Con group_by="column" el MultiIndex es (Price, Ticker):
+    #   nivel 0 → "Close", "Open", …
+    #   nivel 1 → "CEMARGOS.CL", "ICOLCAP.CL", "COP=X"
+    if isinstance(raw.columns, pd.MultiIndex):
+        close = raw["Close"].copy()          # selecciona la capa "Close"
+    else:
+        # En versiones más antiguas de yfinance puede que no haya MultiIndex
+        close = raw[["Close"]].copy() if "Close" in raw.columns else raw.copy()
 
-    # -- Extraer precio de cierre ajustado (o Close como fallback) ----------
-    def get_close(d, name):
-        if "Adj Close" in d.columns:
-            return d["Adj Close"].rename(name)
-        return d["Close"].rename(name)
+    # Renombrar columnas al nombre corto
+    close = close.rename(columns=tkr_map)
 
-    s_a = get_close(df_a, "Argos")
-    s_c = get_close(df_c, "COLCAP")
-    s_t = get_close(df_t, "TRM")
+    # ── Limpieza de índice ─────────────────────────────────────────────────
+    close.index = pd.to_datetime(close.index)
+    if close.index.tz is not None:
+        close.index = close.index.tz_localize(None)
 
-    # -- Unificar, limpiar indice y rellenar festivos BVC -------------------
-    combined = pd.concat([s_a, s_c, s_t], axis=1)
-    combined.index = pd.to_datetime(combined.index)
-    if combined.index.tz is not None:
-        combined.index = combined.index.tz_localize(None)
+    # ffill para cubrir festivos de la BVC, luego dropna
+    close = close.ffill().dropna()
+    close = close.sort_index()
 
-    combined = combined.ffill().dropna()
-    combined = combined.sort_index()
-
-    return combined
+    return close
 
 
 # ─────────────────────────────────────────────
@@ -279,7 +285,7 @@ n = len(df)
 # ─────────────────────────────────────────────
 st.markdown(f"""
 <div class="hero-header">
-    <p class="hero-subtitle">Universidad · Análisis Cuantitativo de Acciones</p>
+    <p class="hero-subtitle">Universidad ITM · Análisis Cuantitativo de Acciones</p>
     <h1 class="hero-title">Cementos <span>Argos</span></h1>
     <p class="hero-subtitle" style="margin-top:0.6rem;">
         Regresión múltiple: COLCAP · TRM · Precio de cierre
@@ -304,18 +310,13 @@ if n < 90:
 # ─────────────────────────────────────────────
 # CORRELACIONES Y MÉTRICAS
 # ─────────────────────────────────────────────
-corr_colcap, pval_colcap = stats.pearsonr(df["Argos"], df["COLCAP"])
-corr_trm,    pval_trm    = stats.pearsonr(df["Argos"], df["TRM"])
+corr_colcap, pval_colcap = stats.pearsonr(df["CEMARGOS"], df["ICOLCAP"])
+corr_trm,    pval_trm    = stats.pearsonr(df["CEMARGOS"], df["TRM"])
 
-ultimo_precio  = float(df["Argos"].iloc[-1])
-penult_precio  = float(df["Argos"].iloc[-2]) if n > 1 else ultimo_precio
+ultimo_precio  = float(df["CEMARGOS"].iloc[-1])
+penult_precio  = float(df["CEMARGOS"].iloc[-2]) if n > 1 else ultimo_precio
 delta_precio   = ultimo_precio - penult_precio
 pct_delta      = (delta_precio / penult_precio) * 100 if penult_precio else 0
-
-# Media Móvil de 20 días sobre el precio de cierre de Argos
-ma20_serie  = df["Argos"].rolling(window=20).mean()
-ma20_ultimo = float(ma20_serie.iloc[-1]) if not ma20_serie.dropna().empty else float("nan")
-ma20_delta  = ultimo_precio - ma20_ultimo  # precio actual vs MA20: positivo = precio sobre la media
 
 # ── Fila de métricas ──
 col1, col2, col3, col4 = st.columns(4)
@@ -340,10 +341,9 @@ with col3:
     )
 with col4:
     st.metric(
-        label="MA 20d · Media Móvil Argos",
-        value=f"${ma20_ultimo:,.0f} COP" if not np.isnan(ma20_ultimo) else "Sin datos",
-        delta=f"{ma20_delta:+,.0f} COP vs precio actual" if not np.isnan(ma20_ultimo) else None,
-        help="Media Móvil Simple de 20 días (rolling window=20) sobre el precio de cierre de CEMARGOS.CL",
+        label="Observaciones en rango",
+        value=f"{n}",
+        delta="✓ Suficientes" if n >= 90 else "⚠ < 90",
     )
 
 st.markdown("---")
@@ -371,7 +371,7 @@ st.markdown('<p class="chart-desc">Serie temporal del precio de cierre ajustado 
 
 fig_ts = go.Figure()
 fig_ts.add_trace(go.Scatter(
-    x=df.index, y=df["Argos"],
+    x=df.index, y=df["CEMARGOS"],
     mode="lines",
     name="CEMARGOS",
     line=dict(color="#D4A843", width=2),
@@ -379,7 +379,7 @@ fig_ts.add_trace(go.Scatter(
     fillcolor="rgba(212,168,67,0.08)",
 ))
 fig_ts.add_trace(go.Scatter(
-    x=df.index, y=df["Argos"].rolling(20).mean(),
+    x=df.index, y=df["CEMARGOS"].rolling(20).mean(),
     mode="lines",
     name="Media móvil 20d",
     line=dict(color="#C0392B", width=1.5, dash="dot"),
@@ -405,13 +405,13 @@ with col_a:
     st.markdown('<p class="chart-title">🔵 Argos vs. COLCAP</p>', unsafe_allow_html=True)
     st.markdown('<p class="chart-desc">Dispersión con línea de tendencia OLS</p>', unsafe_allow_html=True)
 
-    slope1, intercept1, r1, p1, se1 = stats.linregress(df["COLCAP"], df["Argos"])
-    x_line1 = np.linspace(df["COLCAP"].min(), df["COLCAP"].max(), 100)
+    slope1, intercept1, r1, p1, se1 = stats.linregress(df["ICOLCAP"], df["CEMARGOS"])
+    x_line1 = np.linspace(df["ICOLCAP"].min(), df["ICOLCAP"].max(), 100)
     y_line1  = slope1 * x_line1 + intercept1
 
     fig_sc1 = go.Figure()
     fig_sc1.add_trace(go.Scatter(
-        x=df["COLCAP"], y=df["Argos"],
+        x=df["ICOLCAP"], y=df["CEMARGOS"],
         mode="markers",
         name="Observaciones",
         marker=dict(color="#D4A843", size=6, opacity=0.7, line=dict(color="#1f1f35", width=0.5)),
@@ -438,13 +438,13 @@ with col_b:
     st.markdown('<p class="chart-title">🔴 Argos vs. TRM (USD/COP)</p>', unsafe_allow_html=True)
     st.markdown('<p class="chart-desc">Dispersión con línea de tendencia OLS</p>', unsafe_allow_html=True)
 
-    slope2, intercept2, r2, p2, se2 = stats.linregress(df["TRM"], df["Argos"])
+    slope2, intercept2, r2, p2, se2 = stats.linregress(df["TRM"], df["CEMARGOS"])
     x_line2 = np.linspace(df["TRM"].min(), df["TRM"].max(), 100)
     y_line2  = slope2 * x_line2 + intercept2
 
     fig_sc2 = go.Figure()
     fig_sc2.add_trace(go.Scatter(
-        x=df["TRM"], y=df["Argos"],
+        x=df["TRM"], y=df["CEMARGOS"],
         mode="markers",
         name="Observaciones",
         marker=dict(color="#C0392B", size=6, opacity=0.7, line=dict(color="#1f1f35", width=0.5)),
@@ -467,105 +467,32 @@ with col_b:
 
 
 # ─────────────────────────────────────────────
-# GRÁFICO 4: TRIPLE SERIE TEMPORAL NORMALIZADA
+# GRÁFICO 4: DOBLE EJE TEMPORAL (ARGOS + TRM)
 # ─────────────────────────────────────────────
 st.markdown('<div class="chart-section">', unsafe_allow_html=True)
-st.markdown('<p class="chart-title">📊 Evolución temporal comparada · CEMARGOS · ICOLCAP · TRM</p>', unsafe_allow_html=True)
-st.markdown(
-    '<p class="chart-desc">'
-    'Las tres series están normalizadas (Min-Max) para comparar su dirección y magnitud en la misma escala [0, 1]. '
-    'Un valor cercano a 1 indica que la serie está próxima a su máximo histórico en el período seleccionado.'
-    '</p>',
-    unsafe_allow_html=True,
-)
+st.markdown('<p class="chart-title">📊 Argos vs. TRM · Evolución temporal</p>', unsafe_allow_html=True)
+st.markdown('<p class="chart-desc">Comparación normalizada de ambas series en el tiempo</p>', unsafe_allow_html=True)
 
-# Normalización Min-Max de las tres variables juntas (evita errores de índice)
-cols_norm = ["Argos", "COLCAP", "TRM"]
-df_minmax = df[cols_norm].copy()
-for col in cols_norm:
-    col_min = df_minmax[col].min()
-    col_max = df_minmax[col].max()
-    denom   = col_max - col_min
-    df_minmax[col] = (df_minmax[col] - col_min) / denom if denom != 0 else 0.5
+df_norm = (df[["CEMARGOS", "TRM"]] - df[["CEMARGOS", "TRM"]].mean()) / df[["CEMARGOS", "TRM"]].std()
 
-# Colores bien diferenciados
-SERIES = [
-    ("Argos",  "CEMARGOS.CL",   "#D4A843", "solid", 2.5),   # dorado
-    ("COLCAP", "ICOLCAP.CL",    "#4C9BE8", "dash",  2.0),   # azul claro, discontinuo
-    ("TRM",    "TRM · USD/COP", "#E05252", "dot",   2.0),   # rojo coral, punteado
-]
-
-fig_triple = go.Figure()
-
-for col, label, color, dash, width in SERIES:
-    fig_triple.add_trace(go.Scatter(
-        x=df.index,
-        y=df_minmax[col],
-        name=label,
-        mode="lines",
-        line=dict(color=color, width=width, dash=dash),
-        hovertemplate=f"<b>{label}</b><br>Fecha: %{{x|%d %b %Y}}<br>Min-Max: %{{y:.3f}}<extra></extra>",
-    ))
-
-# Línea de referencia en y = 0.5 (punto medio de la escala normalizada)
-fig_triple.add_hline(
-    y=0.5,
-    line_dash="dash",
-    line_color="rgba(245,240,235,0.2)",
-    line_width=1,
-    annotation_text="Punto medio (0.5)",
-    annotation_font_color="rgba(245,240,235,0.4)",
-    annotation_font_size=10,
-    annotation_position="bottom right",
-)
-
-fig_triple.update_layout(
+fig_dual = go.Figure()
+fig_dual.add_trace(go.Scatter(
+    x=df.index, y=df_norm["CEMARGOS"],
+    name="CEMARGOS (norm.)", mode="lines",
+    line=dict(color="#D4A843", width=2),
+))
+fig_dual.add_trace(go.Scatter(
+    x=df.index, y=df_norm["TRM"],
+    name="TRM (norm.)", mode="lines",
+    line=dict(color="#C0392B", width=2, dash="dash"),
+))
+fig_dual.update_layout(
     **PLOTLY_LAYOUT,
     hovermode="x unified",
-    height=380,
-    legend=dict(
-        bgcolor="rgba(30,30,55,0.85)",
-        bordercolor="rgba(212,168,67,0.3)",
-        borderwidth=1,
-        font=dict(size=12),
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        xanchor="left",
-        x=0,
-    ),
-    yaxis_title="Escala normalizada Min-Max [0 – 1]",
-    xaxis_title="Fecha",
-    yaxis=dict(
-        gridcolor="rgba(212,168,67,0.1)",
-        zerolinecolor="rgba(212,168,67,0.2)",
-        tickformat=".2f",
-        range=[-0.05, 1.05],
-    ),
+    height=300,
+    legend=dict(bgcolor="rgba(0,0,0,0)"),
 )
-st.plotly_chart(fig_triple, use_container_width=True)
-
-# Leyenda explicativa de colores
-lc1, lc2, lc3 = st.columns(3)
-with lc1:
-    st.markdown(
-        '<p style="font-family:DM Mono,monospace;font-size:0.75rem;color:#D4A843;">'
-        '▬&nbsp;&nbsp;<b>CEMARGOS.CL</b> — Variable dependiente (Y)</p>',
-        unsafe_allow_html=True,
-    )
-with lc2:
-    st.markdown(
-        '<p style="font-family:DM Mono,monospace;font-size:0.75rem;color:#4C9BE8;">'
-        '╌╌&nbsp;<b>ICOLCAP.CL</b> — Regresora X₁ (mercado)</p>',
-        unsafe_allow_html=True,
-    )
-with lc3:
-    st.markdown(
-        '<p style="font-family:DM Mono,monospace;font-size:0.75rem;color:#E05252;">'
-        '┅&nbsp;&nbsp;<b>TRM (COP=X)</b> — Regresora X₂ (tipo de cambio)</p>',
-        unsafe_allow_html=True,
-    )
-
+st.plotly_chart(fig_dual, use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 
