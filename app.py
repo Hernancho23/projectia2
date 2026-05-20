@@ -318,6 +318,11 @@ penult_precio  = float(df["CEMARGOS"].iloc[-2]) if n > 1 else ultimo_precio
 delta_precio   = ultimo_precio - penult_precio
 pct_delta      = (delta_precio / penult_precio) * 100 if penult_precio else 0
 
+# Media Móvil de 20 días sobre el precio de cierre de Argos
+ma20_serie  = df["CEMARGOS"].rolling(window=20).mean()
+ma20_ultimo = float(ma20_serie.iloc[-1]) if not ma20_serie.dropna().empty else float("nan")
+ma20_delta  = ultimo_precio - ma20_ultimo  # precio actual vs MA20: positivo = precio sobre la media
+
 # ── Fila de métricas ──
 col1, col2, col3, col4 = st.columns(4)
 
@@ -341,9 +346,10 @@ with col3:
     )
 with col4:
     st.metric(
-        label="Observaciones en rango",
-        value=f"{n}",
-        delta="✓ Suficientes" if n >= 90 else "⚠ < 90",
+        label="MA 20d · Media Móvil Argos",
+        value=f"${ma20_ultimo:,.0f} COP" if not np.isnan(ma20_ultimo) else "Sin datos",
+        delta=f"{ma20_delta:+,.0f} COP vs precio actual" if not np.isnan(ma20_ultimo) else None,
+        help="Media Móvil Simple de 20 días (rolling window=20) sobre el precio de cierre de CEMARGOS.CL",
     )
 
 st.markdown("---")
@@ -473,21 +479,26 @@ st.markdown('<div class="chart-section">', unsafe_allow_html=True)
 st.markdown('<p class="chart-title">📊 Evolución temporal comparada · CEMARGOS · ICOLCAP · TRM</p>', unsafe_allow_html=True)
 st.markdown(
     '<p class="chart-desc">'
-    'Las tres series están normalizadas (z-score) para comparar su dirección y magnitud en la misma escala. '
-    'Un valor positivo indica que la serie está por encima de su media histórica en ese período.'
+    'Las tres series están normalizadas (Min-Max) para comparar su dirección y magnitud en la misma escala [0, 1]. '
+    'Un valor cercano a 1 indica que la serie está próxima a su máximo histórico en el período seleccionado.'
     '</p>',
     unsafe_allow_html=True,
 )
 
-# Normalización z-score de las tres variables
+# Normalización Min-Max de las tres variables juntas (evita errores de índice)
 cols_norm = ["CEMARGOS", "ICOLCAP", "TRM"]
-df_norm = (df[cols_norm] - df[cols_norm].mean()) / df[cols_norm].std()
+df_minmax = df[cols_norm].copy()
+for col in cols_norm:
+    col_min = df_minmax[col].min()
+    col_max = df_minmax[col].max()
+    denom   = col_max - col_min
+    df_minmax[col] = (df_minmax[col] - col_min) / denom if denom != 0 else 0.5
 
-# Colores bien diferenciados: dorado (Argos), verde azulado (COLCAP), rojo coral (TRM)
+# Colores bien diferenciados
 SERIES = [
-    ("CEMARGOS", "CEMARGOS.CL",  "#D4A843", "solid",  2.5),   # dorado
-    ("ICOLCAP",  "ICOLCAP.CL",   "#3ABFBF", "solid",  2.0),   # teal brillante
-    ("TRM",      "TRM · USD/COP","#E05252", "dot",    2.0),   # rojo coral
+    ("CEMARGOS", "CEMARGOS.CL",   "#D4A843", "solid", 2.5),   # dorado
+    ("ICOLCAP",  "ICOLCAP.CL",    "#4C9BE8", "dash",  2.0),   # azul claro, discontinuo
+    ("TRM",      "TRM · USD/COP", "#E05252", "dot",   2.0),   # rojo coral, punteado
 ]
 
 fig_triple = go.Figure()
@@ -495,20 +506,20 @@ fig_triple = go.Figure()
 for col, label, color, dash, width in SERIES:
     fig_triple.add_trace(go.Scatter(
         x=df.index,
-        y=df_norm[col],
+        y=df_minmax[col],
         name=label,
         mode="lines",
         line=dict(color=color, width=width, dash=dash),
-        hovertemplate=f"<b>{label}</b><br>Fecha: %{{x|%d %b %Y}}<br>Z-score: %{{y:.3f}}<extra></extra>",
+        hovertemplate=f"<b>{label}</b><br>Fecha: %{{x|%d %b %Y}}<br>Min-Max: %{{y:.3f}}<extra></extra>",
     ))
 
-# Línea de referencia en y = 0 (media histórica)
+# Línea de referencia en y = 0.5 (punto medio de la escala normalizada)
 fig_triple.add_hline(
-    y=0,
+    y=0.5,
     line_dash="dash",
     line_color="rgba(245,240,235,0.2)",
     line_width=1,
-    annotation_text="Media histórica",
+    annotation_text="Punto medio (0.5)",
     annotation_font_color="rgba(245,240,235,0.4)",
     annotation_font_size=10,
     annotation_position="bottom right",
@@ -529,12 +540,13 @@ fig_triple.update_layout(
         xanchor="left",
         x=0,
     ),
-    yaxis_title="Z-score (σ)",
+    yaxis_title="Escala normalizada Min-Max [0 – 1]",
     xaxis_title="Fecha",
     yaxis=dict(
         gridcolor="rgba(212,168,67,0.1)",
         zerolinecolor="rgba(212,168,67,0.2)",
-        tickformat=".1f",
+        tickformat=".2f",
+        range=[-0.05, 1.05],
     ),
 )
 st.plotly_chart(fig_triple, use_container_width=True)
@@ -544,23 +556,19 @@ lc1, lc2, lc3 = st.columns(3)
 with lc1:
     st.markdown(
         '<p style="font-family:DM Mono,monospace;font-size:0.75rem;color:#D4A843;">'
-        '▬  <b>CEMARGOS.CL</b> — Variable dependiente (Y)</p>',
+        '▬&nbsp;&nbsp;<b>CEMARGOS.CL</b> — Variable dependiente (Y)</p>',
         unsafe_allow_html=True,
     )
 with lc2:
     st.markdown(
-        '<p style="font-family:DM Mono,monospace;font-size:0.75rem;color:#3ABFBF;">'
-        '▬  <b>ICOLCAP.CL</b> — Regresora X₁ (mercado)</p>',
+        '<p style="font-family:DM Mono,monospace;font-size:0.75rem;color:#4C9BE8;">'
+        '╌╌&nbsp;<b>ICOLCAP.CL</b> — Regresora X₁ (mercado)</p>',
         unsafe_allow_html=True,
     )
 with lc3:
     st.markdown(
-        '<p style="font-family:DM Mono,monospace;font-size:0.75rem;color:#E05252;">',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
         '<p style="font-family:DM Mono,monospace;font-size:0.75rem;color:#E05252;">'
-        '┅  <b>TRM (COP=X)</b> — Regresora X₂ (tipo de cambio)</p>',
+        '┅&nbsp;&nbsp;<b>TRM (COP=X)</b> — Regresora X₂ (tipo de cambio)</p>',
         unsafe_allow_html=True,
     )
 
