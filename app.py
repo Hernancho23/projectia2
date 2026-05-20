@@ -285,7 +285,7 @@ n = len(df)
 # ─────────────────────────────────────────────
 st.markdown(f"""
 <div class="hero-header">
-    <p class="hero-subtitle">Universidad ITM · Análisis Cuantitativo de Acciones</p>
+    <p class="hero-subtitle">Universidad · Análisis Cuantitativo de Acciones</p>
     <h1 class="hero-title">Cementos <span>Argos</span></h1>
     <p class="hero-subtitle" style="margin-top:0.6rem;">
         Regresión múltiple: COLCAP · TRM · Precio de cierre
@@ -467,32 +467,103 @@ with col_b:
 
 
 # ─────────────────────────────────────────────
-# GRÁFICO 4: DOBLE EJE TEMPORAL (ARGOS + TRM)
+# GRÁFICO 4: TRIPLE SERIE TEMPORAL NORMALIZADA
 # ─────────────────────────────────────────────
 st.markdown('<div class="chart-section">', unsafe_allow_html=True)
-st.markdown('<p class="chart-title">📊 Argos vs. TRM · Evolución temporal</p>', unsafe_allow_html=True)
-st.markdown('<p class="chart-desc">Comparación normalizada de ambas series en el tiempo</p>', unsafe_allow_html=True)
+st.markdown('<p class="chart-title">📊 Evolución temporal comparada · CEMARGOS · ICOLCAP · TRM</p>', unsafe_allow_html=True)
+st.markdown(
+    '<p class="chart-desc">'
+    'Las tres series están normalizadas (z-score) para comparar su dirección y magnitud en la misma escala. '
+    'Un valor positivo indica que la serie está por encima de su media histórica en ese período.'
+    '</p>',
+    unsafe_allow_html=True,
+)
 
-df_norm = (df[["CEMARGOS", "TRM"]] - df[["CEMARGOS", "TRM"]].mean()) / df[["CEMARGOS", "TRM"]].std()
+# Normalización z-score de las tres variables
+cols_norm = ["CEMARGOS", "ICOLCAP", "TRM"]
+df_norm = (df[cols_norm] - df[cols_norm].mean()) / df[cols_norm].std()
 
-fig_dual = go.Figure()
-fig_dual.add_trace(go.Scatter(
-    x=df.index, y=df_norm["CEMARGOS"],
-    name="CEMARGOS (norm.)", mode="lines",
-    line=dict(color="#D4A843", width=2),
-))
-fig_dual.add_trace(go.Scatter(
-    x=df.index, y=df_norm["TRM"],
-    name="TRM (norm.)", mode="lines",
-    line=dict(color="#C0392B", width=2, dash="dash"),
-))
-fig_dual.update_layout(
+# Colores bien diferenciados: dorado (Argos), verde azulado (COLCAP), rojo coral (TRM)
+SERIES = [
+    ("CEMARGOS", "CEMARGOS.CL",  "#D4A843", "solid",  2.5),   # dorado
+    ("ICOLCAP",  "ICOLCAP.CL",   "#3ABFBF", "solid",  2.0),   # teal brillante
+    ("TRM",      "TRM · USD/COP","#E05252", "dot",    2.0),   # rojo coral
+]
+
+fig_triple = go.Figure()
+
+for col, label, color, dash, width in SERIES:
+    fig_triple.add_trace(go.Scatter(
+        x=df.index,
+        y=df_norm[col],
+        name=label,
+        mode="lines",
+        line=dict(color=color, width=width, dash=dash),
+        hovertemplate=f"<b>{label}</b><br>Fecha: %{{x|%d %b %Y}}<br>Z-score: %{{y:.3f}}<extra></extra>",
+    ))
+
+# Línea de referencia en y = 0 (media histórica)
+fig_triple.add_hline(
+    y=0,
+    line_dash="dash",
+    line_color="rgba(245,240,235,0.2)",
+    line_width=1,
+    annotation_text="Media histórica",
+    annotation_font_color="rgba(245,240,235,0.4)",
+    annotation_font_size=10,
+    annotation_position="bottom right",
+)
+
+fig_triple.update_layout(
     **PLOTLY_LAYOUT,
     hovermode="x unified",
-    height=300,
-    legend=dict(bgcolor="rgba(0,0,0,0)"),
+    height=380,
+    legend=dict(
+        bgcolor="rgba(30,30,55,0.85)",
+        bordercolor="rgba(212,168,67,0.3)",
+        borderwidth=1,
+        font=dict(size=12),
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="left",
+        x=0,
+    ),
+    yaxis_title="Z-score (σ)",
+    xaxis_title="Fecha",
+    yaxis=dict(
+        gridcolor="rgba(212,168,67,0.1)",
+        zerolinecolor="rgba(212,168,67,0.2)",
+        tickformat=".1f",
+    ),
 )
-st.plotly_chart(fig_dual, use_container_width=True)
+st.plotly_chart(fig_triple, use_container_width=True)
+
+# Leyenda explicativa de colores
+lc1, lc2, lc3 = st.columns(3)
+with lc1:
+    st.markdown(
+        '<p style="font-family:DM Mono,monospace;font-size:0.75rem;color:#D4A843;">'
+        '▬  <b>CEMARGOS.CL</b> — Variable dependiente (Y)</p>',
+        unsafe_allow_html=True,
+    )
+with lc2:
+    st.markdown(
+        '<p style="font-family:DM Mono,monospace;font-size:0.75rem;color:#3ABFBF;">'
+        '▬  <b>ICOLCAP.CL</b> — Regresora X₁ (mercado)</p>',
+        unsafe_allow_html=True,
+    )
+with lc3:
+    st.markdown(
+        '<p style="font-family:DM Mono,monospace;font-size:0.75rem;color:#E05252;">',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<p style="font-family:DM Mono,monospace;font-size:0.75rem;color:#E05252;">'
+        '┅  <b>TRM (COP=X)</b> — Regresora X₂ (tipo de cambio)</p>',
+        unsafe_allow_html=True,
+    )
+
 st.markdown('</div>', unsafe_allow_html=True)
 
 
