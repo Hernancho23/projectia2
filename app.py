@@ -285,7 +285,7 @@ n = len(df)
 # ─────────────────────────────────────────────
 st.markdown(f"""
 <div class="hero-header">
-    <p class="hero-subtitle">Universidad · Análisis Cuantitativo de Acciones</p>
+    <p class="hero-subtitle">Universidad ITM · Análisis Cuantitativo de Acciones</p>
     <h1 class="hero-title">Cementos <span>Argos</span></h1>
     <p class="hero-subtitle" style="margin-top:0.6rem;">
         Regresión múltiple: COLCAP · TRM · Precio de cierre
