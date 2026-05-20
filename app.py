@@ -183,48 +183,42 @@ hr { border-color: var(--argos-border); }
 @st.cache_data(ttl=3600)
 def load_data():
     end   = datetime.today()
-    start = end - timedelta(days=210)  # ~7 meses con margen extra para ≥90 obs limpias
+    start = end - timedelta(days=210)  # ~7 meses con margen para >=90 obs limpias
 
-    tkr_map = {
-        "CEMARGOS.CL": "CEMARGOS",
-        "ICOLCAP.CL":  "ICOLCAP",
-        "COP=X":       "TRM",
-    }
-    tickers = list(tkr_map.keys())
+    ticker_argos  = "CEMARGOS.CL"
+    ticker_colcap = "ICOLCAP.CL"
+    ticker_trm    = "COP=X"
 
-    # Descarga conjunta → yfinance devuelve MultiIndex (Price, Ticker) en columnas
-    raw = yf.download(
-        tickers,
-        start=start,
-        end=end,
-        auto_adjust=True,
-        progress=False,
-        group_by="column",   # columnas agrupadas por tipo de precio
-    )
+    # -- Descarga individual por ticker (evita MultiIndex cruzado) ----------
+    df_a = yf.download(ticker_argos,  start=start, end=end, progress=False)
+    df_c = yf.download(ticker_colcap, start=start, end=end, progress=False)
+    df_t = yf.download(ticker_trm,    start=start, end=end, progress=False)
 
-    # ── Aplanar / extraer precios de cierre ────────────────────────────────
-    # Con group_by="column" el MultiIndex es (Price, Ticker):
-    #   nivel 0 → "Close", "Open", …
-    #   nivel 1 → "CEMARGOS.CL", "ICOLCAP.CL", "COP=X"
-    if isinstance(raw.columns, pd.MultiIndex):
-        close = raw["Close"].copy()          # selecciona la capa "Close"
-    else:
-        # En versiones más antiguas de yfinance puede que no haya MultiIndex
-        close = raw[["Close"]].copy() if "Close" in raw.columns else raw.copy()
+    # -- Aplanar MultiIndex si yfinance lo genera ---------------------------
+    for d in [df_a, df_c, df_t]:
+        if isinstance(d.columns, pd.MultiIndex):
+            d.columns = d.columns.get_level_values(0)
 
-    # Renombrar columnas al nombre corto
-    close = close.rename(columns=tkr_map)
+    # -- Extraer precio de cierre ajustado (o Close como fallback) ----------
+    def get_close(d, name):
+        if "Adj Close" in d.columns:
+            return d["Adj Close"].rename(name)
+        return d["Close"].rename(name)
 
-    # ── Limpieza de índice ─────────────────────────────────────────────────
-    close.index = pd.to_datetime(close.index)
-    if close.index.tz is not None:
-        close.index = close.index.tz_localize(None)
+    s_a = get_close(df_a, "Argos")
+    s_c = get_close(df_c, "COLCAP")
+    s_t = get_close(df_t, "TRM")
 
-    # ffill para cubrir festivos de la BVC, luego dropna
-    close = close.ffill().dropna()
-    close = close.sort_index()
+    # -- Unificar, limpiar indice y rellenar festivos BVC -------------------
+    combined = pd.concat([s_a, s_c, s_t], axis=1)
+    combined.index = pd.to_datetime(combined.index)
+    if combined.index.tz is not None:
+        combined.index = combined.index.tz_localize(None)
 
-    return close
+    combined = combined.ffill().dropna()
+    combined = combined.sort_index()
+
+    return combined
 
 
 # ─────────────────────────────────────────────
@@ -285,7 +279,7 @@ n = len(df)
 # ─────────────────────────────────────────────
 st.markdown(f"""
 <div class="hero-header">
-    <p class="hero-subtitle">Universidad ITM · Análisis Cuantitativo de Acciones</p>
+    <p class="hero-subtitle">Universidad · Análisis Cuantitativo de Acciones</p>
     <h1 class="hero-title">Cementos <span>Argos</span></h1>
     <p class="hero-subtitle" style="margin-top:0.6rem;">
         Regresión múltiple: COLCAP · TRM · Precio de cierre
@@ -310,13 +304,18 @@ if n < 90:
 # ─────────────────────────────────────────────
 # CORRELACIONES Y MÉTRICAS
 # ─────────────────────────────────────────────
-corr_colcap, pval_colcap = stats.pearsonr(df["CEMARGOS"], df["ICOLCAP"])
-corr_trm,    pval_trm    = stats.pearsonr(df["CEMARGOS"], df["TRM"])
+corr_colcap, pval_colcap = stats.pearsonr(df["Argos"], df["COLCAP"])
+corr_trm,    pval_trm    = stats.pearsonr(df["Argos"], df["TRM"])
 
-ultimo_precio  = float(df["CEMARGOS"].iloc[-1])
-penult_precio  = float(df["CEMARGOS"].iloc[-2]) if n > 1 else ultimo_precio
+ultimo_precio  = float(df["Argos"].iloc[-1])
+penult_precio  = float(df["Argos"].iloc[-2]) if n > 1 else ultimo_precio
 delta_precio   = ultimo_precio - penult_precio
 pct_delta      = (delta_precio / penult_precio) * 100 if penult_precio else 0
+
+# Media Móvil de 20 días sobre el precio de cierre de Argos
+ma20_serie  = df["Argos"].rolling(window=20).mean()
+ma20_ultimo = float(ma20_serie.iloc[-1]) if not ma20_serie.dropna().empty else float("nan")
+ma20_delta  = ultimo_precio - ma20_ultimo  # precio actual vs MA20: positivo = precio sobre la media
 
 # ── Fila de métricas ──
 col1, col2, col3, col4 = st.columns(4)
@@ -341,9 +340,10 @@ with col3:
     )
 with col4:
     st.metric(
-        label="Observaciones en rango",
-        value=f"{n}",
-        delta="✓ Suficientes" if n >= 90 else "⚠ < 90",
+        label="MA 20d · Media Móvil Argos",
+        value=f"${ma20_ultimo:,.0f} COP" if not np.isnan(ma20_ultimo) else "Sin datos",
+        delta=f"{ma20_delta:+,.0f} COP vs precio actual" if not np.isnan(ma20_ultimo) else None,
+        help="Media Móvil Simple de 20 días (rolling window=20) sobre el precio de cierre de CEMARGOS.CL",
     )
 
 st.markdown("---")
@@ -371,7 +371,7 @@ st.markdown('<p class="chart-desc">Serie temporal del precio de cierre ajustado 
 
 fig_ts = go.Figure()
 fig_ts.add_trace(go.Scatter(
-    x=df.index, y=df["CEMARGOS"],
+    x=df.index, y=df["Argos"],
     mode="lines",
     name="CEMARGOS",
     line=dict(color="#D4A843", width=2),
@@ -379,7 +379,7 @@ fig_ts.add_trace(go.Scatter(
     fillcolor="rgba(212,168,67,0.08)",
 ))
 fig_ts.add_trace(go.Scatter(
-    x=df.index, y=df["CEMARGOS"].rolling(20).mean(),
+    x=df.index, y=df["Argos"].rolling(20).mean(),
     mode="lines",
     name="Media móvil 20d",
     line=dict(color="#C0392B", width=1.5, dash="dot"),
@@ -405,13 +405,13 @@ with col_a:
     st.markdown('<p class="chart-title">🔵 Argos vs. COLCAP</p>', unsafe_allow_html=True)
     st.markdown('<p class="chart-desc">Dispersión con línea de tendencia OLS</p>', unsafe_allow_html=True)
 
-    slope1, intercept1, r1, p1, se1 = stats.linregress(df["ICOLCAP"], df["CEMARGOS"])
-    x_line1 = np.linspace(df["ICOLCAP"].min(), df["ICOLCAP"].max(), 100)
+    slope1, intercept1, r1, p1, se1 = stats.linregress(df["COLCAP"], df["Argos"])
+    x_line1 = np.linspace(df["COLCAP"].min(), df["COLCAP"].max(), 100)
     y_line1  = slope1 * x_line1 + intercept1
 
     fig_sc1 = go.Figure()
     fig_sc1.add_trace(go.Scatter(
-        x=df["ICOLCAP"], y=df["CEMARGOS"],
+        x=df["COLCAP"], y=df["Argos"],
         mode="markers",
         name="Observaciones",
         marker=dict(color="#D4A843", size=6, opacity=0.7, line=dict(color="#1f1f35", width=0.5)),
@@ -438,13 +438,13 @@ with col_b:
     st.markdown('<p class="chart-title">🔴 Argos vs. TRM (USD/COP)</p>', unsafe_allow_html=True)
     st.markdown('<p class="chart-desc">Dispersión con línea de tendencia OLS</p>', unsafe_allow_html=True)
 
-    slope2, intercept2, r2, p2, se2 = stats.linregress(df["TRM"], df["CEMARGOS"])
+    slope2, intercept2, r2, p2, se2 = stats.linregress(df["TRM"], df["Argos"])
     x_line2 = np.linspace(df["TRM"].min(), df["TRM"].max(), 100)
     y_line2  = slope2 * x_line2 + intercept2
 
     fig_sc2 = go.Figure()
     fig_sc2.add_trace(go.Scatter(
-        x=df["TRM"], y=df["CEMARGOS"],
+        x=df["TRM"], y=df["Argos"],
         mode="markers",
         name="Observaciones",
         marker=dict(color="#C0392B", size=6, opacity=0.7, line=dict(color="#1f1f35", width=0.5)),
@@ -467,30 +467,42 @@ with col_b:
 
 
 # ─────────────────────────────────────────────
-# GRÁFICO 4: DOBLE EJE TEMPORAL (ARGOS + TRM)
+# GRÁFICO 4: EVOLUCIÓN TEMPORAL CONJUNTA (ARGOS + COLCAP + TRM)
 # ─────────────────────────────────────────────
 st.markdown('<div class="chart-section">', unsafe_allow_html=True)
-st.markdown('<p class="chart-title">📊 Argos vs. TRM · Evolución temporal</p>', unsafe_allow_html=True)
-st.markdown('<p class="chart-desc">Comparación normalizada de ambas series en el tiempo</p>', unsafe_allow_html=True)
+st.markdown('<p class="chart-title">📊 Análisis Relacional · Evolución Temporal Conjunta</p>', unsafe_allow_html=True)
+st.markdown('<p class="chart-desc">Comparación simultánea normalizada (Z-score) de las tres series en el tiempo</p>', unsafe_allow_html=True)
 
-df_norm = (df[["CEMARGOS", "TRM"]] - df[["CEMARGOS", "TRM"]].mean()) / df[["CEMARGOS", "TRM"]].std()
+# Normalizar las 3 variables para que compartan la misma escala visual
+# Nota: los nombres internos del DataFrame son Argos/COLCAP/TRM tras la limpieza
+df_norm = (df[["Argos", "COLCAP", "TRM"]] - df[["Argos", "COLCAP", "TRM"]].mean()) / df[["Argos", "COLCAP", "TRM"]].std()
 
 fig_dual = go.Figure()
+
+# Línea 1: Cementos Argos (Variable Y)
 fig_dual.add_trace(go.Scatter(
-    x=df.index, y=df_norm["CEMARGOS"],
-    name="CEMARGOS (norm.)", mode="lines",
-    line=dict(color="#D4A843", width=2),
+    x=df.index, y=df_norm["Argos"],
+    name="CEMARGOS (Y)", mode="lines",
+    line=dict(color="#D4A843", width=2.5),
 ))
+# Línea 2: Índice MSCI COLCAP (Variable X1)
+fig_dual.add_trace(go.Scatter(
+    x=df.index, y=df_norm["COLCAP"],
+    name="ICOLCAP (X₁)", mode="lines",
+    line=dict(color="#16A085", width=1.8, dash="solid"),
+))
+# Línea 3: TRM Dólar (Variable X2)
 fig_dual.add_trace(go.Scatter(
     x=df.index, y=df_norm["TRM"],
-    name="TRM (norm.)", mode="lines",
-    line=dict(color="#C0392B", width=2, dash="dash"),
+    name="TRM USD/COP (X₂)", mode="lines",
+    line=dict(color="#C0392B", width=1.8, dash="dash"),
 ))
+
 fig_dual.update_layout(
     **PLOTLY_LAYOUT,
     hovermode="x unified",
-    height=300,
-    legend=dict(bgcolor="rgba(0,0,0,0)"),
+    height=360,
+    legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
 st.plotly_chart(fig_dual, use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
